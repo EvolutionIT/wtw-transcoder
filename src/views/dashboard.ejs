@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>
+    <%= title %>
+  </title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <style>
+    body {
+      background-color: #f8f9fa;
+    }
+
+    .navbar {
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    .card {
+      box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+      border: 1px solid rgba(0, 0, 0, 0.125);
+      margin-bottom: 1.5rem;
+      transition: transform 0.2s;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+    }
+
+    .stat-card {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+    }
+
+    .stat-card.queued {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .stat-card.processing {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    }
+
+    .stat-card.completed {
+      background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+    }
+
+    .stat-card.failed {
+      background: linear-gradient(135deg, #fc466b 0%, #3f5efb 100%);
+    }
+
+    .stat-card.total {
+      background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
+      color: #333;
+    }
+
+    .stat-number {
+      font-size: 2.5rem;
+      font-weight: bold;
+      line-height: 1;
+    }
+
+    .stat-label {
+      font-size: 0.9rem;
+      opacity: 0.9;
+      margin-top: 0.5rem;
+    }
+
+    .progress {
+      height: 8px;
+      border-radius: 4px;
+    }
+
+    .status-badge {
+      font-size: 0.8rem;
+      padding: 0.4rem 0.8rem;
+    }
+
+    .job-row {
+      transition: background-color 0.2s;
+    }
+
+    .job-row:hover {
+      background-color: rgba(0, 0, 0, 0.02);
+    }
+
+    .refresh-btn {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 1000;
+      border-radius: 50px;
+      padding: 12px 20px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+
+    .auto-refresh {
+      color: #28a745;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.5;
+      }
+
+      100% {
+        opacity: 1;
+      }
+    }
+
+    .table-responsive {
+      border-radius: 0.5rem;
+      overflow: hidden;
+      box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    }
+
+    .navbar-brand {
+      font-weight: 600;
+    }
+
+    .queue-stats-card {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+    }
+
+    .queue-stat {
+      text-align: center;
+      padding: 0.5rem;
+    }
+
+    .queue-stat-number {
+      font-size: 1.5rem;
+      font-weight: bold;
+      display: block;
+    }
+
+    .queue-stat-label {
+      font-size: 0.8rem;
+      opacity: 0.8;
+    }
+
+    .time-ago {
+      font-size: 0.8rem;
+      color: #6c757d;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: #6c757d;
+    }
+
+    .empty-state i {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      opacity: 0.5;
+    }
+  </style>
+</head>
+
+<body>
+  <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/">
+        <i class="fas fa-video me-2"></i>
+        Video Transcoding Service
+      </a>
+      <div class="navbar-nav ms-auto">
+        <span class="navbar-text">
+          <i class="fas fa-clock me-1"></i>
+          <span id="current-time">
+            <%= currentTime %>
+          </span>
+        </span>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container-fluid py-4">
+    <!-- Job Statistics -->
+    <div class="row mb-4">
+      <div class="col-md-2 col-sm-6 mb-3">
+        <div class="card stat-card queued">
+          <div class="card-body text-center">
+            <div class="stat-number">
+              <%= jobCounts.queued %>
+            </div>
+            <div class="stat-label">Queued</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2 col-sm-6 mb-3">
+        <div class="card stat-card processing">
+          <div class="card-body text-center">
+            <div class="stat-number">
+              <%= jobCounts.processing %>
+            </div>
+            <div class="stat-label">Processing</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2 col-sm-6 mb-3">
+        <div class="card stat-card completed">
+          <div class="card-body text-center">
+            <div class="stat-number">
+              <%= jobCounts.completed %>
+            </div>
+            <div class="stat-label">Completed</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2 col-sm-6 mb-3">
+        <div class="card stat-card failed">
+          <div class="card-body text-center">
+            <div class="stat-number">
+              <%= jobCounts.failed %>
+            </div>
+            <div class="stat-label">Failed</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2 col-sm-6 mb-3">
+        <div class="card stat-card total">
+          <div class="card-body text-center">
+            <div class="stat-number">
+              <%= jobCounts.total %>
+            </div>
+            <div class="stat-label">Total Jobs</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Queue Statistics -->
+    <div class="row mb-4">
+      <div class="col-12">
+        <div class="card queue-stats-card">
+          <div class="card-header">
+            <h5 class="mb-0">
+              <i class="fas fa-list me-2"></i>
+              Queue Status
+            </h5>
+          </div>
+          <div class="card-body">
+            <div class="row">
+              <div class="col-md-2 col-4">
+                <div class="queue-stat">
+                  <span class="queue-stat-number">
+                    <%= queueStats.waiting %>
+                  </span>
+                  <div class="queue-stat-label">Waiting</div>
+                </div>
+              </div>
+              <div class="col-md-2 col-4">
+                <div class="queue-stat">
+                  <span class="queue-stat-number">
+                    <%= queueStats.active %>
+                  </span>
+                  <div class="queue-stat-label">Active</div>
+                </div>
+              </div>
+              <div class="col-md-2 col-4">
+                <div class="queue-stat">
+                  <span class="queue-stat-number">
+                    <%= queueStats.completed %>
+                  </span>
+                  <div class="queue-stat-label">Completed</div>
+                </div>
+              </div>
+              <div class="col-md-2 col-4">
+                <div class="queue-stat">
+                  <span class="queue-stat-number">
+                    <%= queueStats.failed %>
+                  </span>
+                  <div class="queue-stat-label">Failed</div>
+                </div>
+              </div>
+              <div class="col-md-2 col-4">
+                <div class="queue-stat">
+                  <span class="queue-stat-number">
+                    <%= queueStats.delayed %>
+                  </span>
+                  <div class="queue-stat-label">Delayed</div>
+                </div>
+              </div>
+              <div class="col-md-2 col-4">
+                <div class="queue-stat">
+                  <span class="queue-stat-number">
+                    <%= queueStats.total %>
+                  </span>
+                  <div class="queue-stat-label">Total</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent Jobs -->
+    <div class="row">
+      <div class="col-12">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">
+              <i class="fas fa-history me-2"></i>
+              Recent Jobs
+            </h5>
+            <small class="text-muted">Last 10 jobs</small>
+          </div>
+          <div class="card-body p-0">
+            <% if (recentJobs && recentJobs.length> 0) { %>
+              <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Job ID</th>
+                      <th>File</th>
+                      <th>Video Name</th>
+                      <th>Status</th>
+                      <th>Progress</th>
+                      <th>Resolutions</th>
+                      <th>Created</th>
+                      <th>Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% recentJobs.forEach(function(job) { %>
+                      <tr class="job-row">
+                        <td>
+                          <small class="font-monospace text-primary">
+                            <%= job.job_id.substring(0, 8) %>...
+                          </small>
+                        </td>
+                        <td>
+                          <small>
+                            <%= job.original_key %>
+                          </small>
+                        </td>
+                        <td>
+                          <% if (job.metadata && job.metadata.videoName) { %>
+                            <span class="badge bg-info text-dark">
+                              <%= job.metadata.videoName %>
+                            </span>
+                            <% } else { %>
+                              <span class="text-muted">-</span>
+                              <% } %>
+                        </td>
+                        <td>
+                          <% let statusClass='secondary' ; let statusIcon='fas fa-question' ; switch(job.status) {
+                            case 'queued' : statusClass='primary' ; statusIcon='fas fa-clock' ; break; case 'processing'
+                            : statusClass='warning' ; statusIcon='fas fa-cog fa-spin' ; break; case 'completed' :
+                            statusClass='success' ; statusIcon='fas fa-check' ; break; case 'failed' :
+                            statusClass='danger' ; statusIcon='fas fa-exclamation-triangle' ; break; } %>
+                            <span class="badge bg-<%= statusClass %> status-badge">
+                              <i class="<%= statusIcon %> me-1"></i>
+                              <%= job.status.charAt(0).toUpperCase() + job.status.slice(1) %>
+                            </span>
+                        </td>
+                        <td>
+                          <div class="d-flex align-items-center">
+                            <div class="progress me-2" style="width: 80px;">
+                              <div class="progress-bar 
+                                                            <% if (job.status === 'completed') { %>bg-success<% } 
+                                                               else if (job.status === 'failed') { %>bg-danger<% } 
+                                                               else if (job.status === 'processing') { %>bg-warning<% } 
+                                                               else { %>bg-primary<% } %>"
+                                style="width: <%= job.progress || 0 %>%">
+                              </div>
+                            </div>
+                            <small>
+                              <%= job.progress || 0 %>%
+                            </small>
+                          </div>
+                        </td>
+                        <td>
+                          <% if (job.resolutions && job.resolutions.length> 0) { %>
+                            <% job.resolutions.forEach(function(resolution, index) { %>
+                              <span class="badge bg-light text-dark me-1">
+                                <%= resolution %>
+                              </span>
+                              <% }); %>
+                                <% } else { %>
+                                  <span class="text-muted">-</span>
+                                  <% } %>
+                        </td>
+                        <td>
+                          <small class="time-ago">
+                            <%= new Date(job.created_at).toLocaleString() %>
+                          </small>
+                        </td>
+                        <td>
+                          <% if (job.duration) { %>
+                            <small>
+                              <%= Math.round(job.duration) %>s
+                            </small>
+                            <% } else { %>
+                              <span class="text-muted">-</span>
+                              <% } %>
+                        </td>
+                      </tr>
+                      <% }); %>
+                  </tbody>
+                </table>
+              </div>
+              <% } else { %>
+                <div class="empty-state">
+                  <i class="fas fa-inbox"></i>
+                  <h5>No jobs found</h5>
+                  <p class="text-muted">No transcoding jobs have been created yet.</p>
+                </div>
+                <% } %>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn btn-primary refresh-btn" onclick="refreshData()" id="refresh-btn"
+    title="Click to refresh, Double-click for auto-refresh">
+    <i class="fas fa-sync-alt me-1"></i>
+    Refresh
+  </button>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+  <script>
+    let autoRefreshInterval;
+    let isAutoRefresh = false;
+
+    function updateTime() {
+      document.getElementById('current-time').textContent = new Date().toISOString();
+    }
+
+    function refreshData() {
+      const btn = document.getElementById('refresh-btn');
+      const icon = btn.querySelector('i');
+
+      icon.classList.add('fa-spin');
+      btn.disabled = true;
+
+      setTimeout(() => {
+        window.location.reload();
+      }, 500);
+    }
+
+    function toggleAutoRefresh() {
+      if (isAutoRefresh) {
+        clearInterval(autoRefreshInterval);
+        isAutoRefresh = false;
+        document.getElementById('refresh-btn').innerHTML = '<i class="fas fa-sync-alt me-1"></i>Refresh';
+        document.getElementById('refresh-btn').title = 'Click to refresh, Double-click for auto-refresh';
+      } else {
+        autoRefreshInterval = setInterval(refreshData, 5000); // Refresh every 5 seconds
+        isAutoRefresh = true;
+        document.getElementById('refresh-btn').innerHTML = '<i class="fas fa-sync-alt me-1 auto-refresh"></i>Auto';
+        document.getElementById('refresh-btn').title = 'Auto-refresh enabled (5s) - Double-click to disable';
+      }
+    }
+
+    setInterval(updateTime, 1000);
+
+    document.getElementById('refresh-btn').addEventListener('dblclick', function (e) {
+      e.preventDefault();
+      toggleAutoRefresh();
+    });
+
+    let clickTimeout;
+    document.getElementById('refresh-btn').addEventListener('click', function (e) {
+      clearTimeout(clickTimeout);
+      clickTimeout = setTimeout(() => {
+        if (!isAutoRefresh) {
+          refreshData();
+        }
+      }, 200);
+    });
+
+    var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+      return new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+  </script>
+</body>
+
+</html>
