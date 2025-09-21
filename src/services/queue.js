@@ -18,7 +18,7 @@ async function initializeQueue() {
     });
 
     redisClient.on("connect", () => {
-      console.log("✅ Connected to Redis");
+      console.log("Connected to Redis");
     });
 
     await redisClient.connect();
@@ -47,14 +47,17 @@ async function initializeQueue() {
     );
 
     transcodingQueue.on("active", async (job) => {
+      console.log(`Job ${job.id} started processing: ${job.data.originalKey}`);
       await JobManager.updateJobStatus(job.data.jobId, JOB_STATUS.PROCESSING);
     });
 
     transcodingQueue.on("progress", async (job, progress) => {
+      console.log(`Job ${job.id} progress: ${progress}%`);
       await JobManager.updateJobProgress(job.data.jobId, progress);
     });
 
     transcodingQueue.on("completed", async (job, result) => {
+      console.log(`Job ${job.id} completed: ${result.outputKey}`);
       await JobManager.completeJob(
         job.data.jobId,
         result.outputKey,
@@ -65,7 +68,12 @@ async function initializeQueue() {
     });
 
     transcodingQueue.on("failed", async (job, err) => {
+      console.error(`Job ${job.id} failed:`, err.message);
       await JobManager.setJobError(job.data.jobId, err.message);
+    });
+
+    transcodingQueue.on("stalled", async (job) => {
+      console.warn(`Job ${job.id} stalled, will retry`);
     });
 
     setInterval(
@@ -79,7 +87,10 @@ async function initializeQueue() {
       },
       60 * 60 * 1000,
     );
+
+    console.log("Queue system initialized successfully");
   } catch (error) {
+    console.error("Queue initialization failed:", error);
     throw error;
   }
 }
@@ -91,6 +102,8 @@ class QueueManager {
     resolutions,
     priority = 0,
     videoName = null,
+    environment = "production",
+    callbackUrl = null,
   ) {
     try {
       if (!transcodingQueue) {
@@ -102,6 +115,8 @@ class QueueManager {
         originalKey,
         resolutions,
         videoName: videoName || basename(originalKey, extname(originalKey)),
+        environment: environment,
+        callbackUrl: callbackUrl,
       };
 
       const job = await transcodingQueue.add("transcode-video", jobData, {
@@ -115,8 +130,10 @@ class QueueManager {
         removeOnFail: 5,
       });
 
+      console.log(`Added transcoding job to queue: ${jobId} (${environment})`);
       return job;
     } catch (error) {
+      console.error("Failed to add transcoding job to queue:", error);
       throw error;
     }
   }
@@ -212,7 +229,7 @@ class QueueManager {
       const job = await transcodingQueue.getJob(jobId);
       if (job) {
         await job.retry();
-        console.log(`🔄 Retrying job ${jobId}`);
+        console.log(`Retrying job ${jobId}`);
         return true;
       }
       return false;
@@ -231,6 +248,7 @@ class QueueManager {
       const job = await transcodingQueue.getJob(jobId);
       if (job) {
         await job.remove();
+        console.log(`Removed job ${jobId}`);
         return true;
       }
       return false;
@@ -245,6 +263,7 @@ class QueueManager {
       throw new Error("Queue not initialized");
     }
     await transcodingQueue.pause();
+    console.log("Queue paused");
   }
 
   static async resumeQueue() {
@@ -252,6 +271,7 @@ class QueueManager {
       throw new Error("Queue not initialized");
     }
     await transcodingQueue.resume();
+    console.log("Queue resumed");
   }
 
   static async isQueuePaused() {
@@ -287,6 +307,7 @@ class QueueManager {
 }
 
 process.on("SIGTERM", async () => {
+  console.log("Shutting down queue...");
   if (transcodingQueue) {
     await transcodingQueue.close();
   }

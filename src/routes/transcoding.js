@@ -19,10 +19,35 @@ function authenticate(req, res, next) {
 
 router.post("/transcode", authenticate, async (req, res) => {
   try {
-    const { key, resolutions, priority, videoName } = req.body;
+    const { key, resolutions, priority, videoName, callback_url, env } =
+      req.body;
 
     if (!key) {
       return res.status(400).json({ error: "Missing required parameter: key" });
+    }
+
+    const validEnvironments = ["staging", "production"];
+    const environment = env || "production"; // Default to production
+
+    if (!validEnvironments.includes(environment)) {
+      return res.status(400).json({
+        error: `Invalid environment: ${environment}. Valid options: ${validEnvironments.join(", ")}`,
+      });
+    }
+
+    if (callback_url) {
+      try {
+        const url = new URL(callback_url);
+        if (!["http:", "https:"].includes(url.protocol)) {
+          return res.status(400).json({
+            error: "Callback URL must use HTTP or HTTPS protocol",
+          });
+        }
+      } catch (urlError) {
+        return res.status(400).json({
+          error: "Invalid callback URL format",
+        });
+      }
     }
 
     const targetResolutions = resolutions || [
@@ -44,10 +69,8 @@ router.post("/transcode", authenticate, async (req, res) => {
       });
     }
 
-    // Generate videoName if not provided
     const outputVideoName = videoName || basename(key, extname(key));
 
-    // Validate videoName format (should be filesystem-safe)
     const videoNameRegex = /^[a-zA-Z0-9_-]+$/;
     if (!videoNameRegex.test(outputVideoName)) {
       return res.status(400).json({
@@ -58,7 +81,6 @@ router.post("/transcode", authenticate, async (req, res) => {
 
     try {
       const b2Service = getB2Service();
-      // Check if file exists in Original Video bucket
       const fileInfo = await b2Service.getFileInfo(
         key,
         BUCKET_TYPES.ORIGINAL_VIDEO,
@@ -69,32 +91,36 @@ router.post("/transcode", authenticate, async (req, res) => {
           .json({ error: `File not found in Original Video bucket: ${key}` });
       }
       console.log(
-        `📁 Found file: ${key} (${fileInfo.formattedSize}) in OV bucket`,
+        `Found file: ${key} (${fileInfo.formattedSize}) in OV bucket`,
       );
     } catch (b2Error) {
-      console.warn("⚠️  Could not verify file in B2:", b2Error.message);
-      // Continue anyway - the worker will handle the error
+      console.warn("Could not verify file in B2:", b2Error.message);
+      // let the worker handle the error
     }
 
     const jobId = uuidv4();
 
-    // Store job in database with videoName
-    await JobManager.createJob(jobId, key, targetResolutions, {
+    const jobMetadata = {
       videoName: outputVideoName,
-      originalFileSize: null, // Will be populated during transcoding
-    });
+      environment: environment,
+      callbackUrl: callback_url || null,
+      originalFileSize: null,
+    };
 
-    // Add job to queue with all required parameters
+    await JobManager.createJob(jobId, key, targetResolutions, jobMetadata);
+
     await QueueManager.addTranscodingJob(
       jobId,
       key,
       targetResolutions,
       priority || 0,
-      outputVideoName, // Pass videoName to the worker
+      outputVideoName,
+      environment,
+      callback_url,
     );
 
     console.log(
-      `📋 New transcoding job created: ${jobId} for ${key} -> ${outputVideoName}`,
+      `New transcoding job created: ${jobId} for ${key} -> ${outputVideoName} (${environment})`,
     );
 
     res.status(201).json({
@@ -102,12 +128,14 @@ router.post("/transcode", authenticate, async (req, res) => {
       jobId,
       originalKey: key,
       videoName: outputVideoName,
+      environment: environment,
+      callbackUrl: callback_url,
       resolutions: targetResolutions,
       status: "queued",
       message: "Transcoding job created successfully",
     });
   } catch (error) {
-    console.error("❌ Failed to create transcoding job:", error);
+    console.error("Failed to create transcoding job:", error);
     res.status(500).json({
       error: "Failed to create transcoding job",
       message: error.message,
@@ -144,7 +172,7 @@ router.get("/job/:jobId", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("❌ Failed to get job status:", error);
+    console.error("Failed to get job status:", error);
     res
       .status(500)
       .json({ error: "Failed to get job status", message: error.message });
@@ -193,7 +221,7 @@ router.get("/jobs", async (req, res) => {
       summary: counts,
     });
   } catch (error) {
-    console.error("❌ Failed to get jobs:", error);
+    console.error("Failed to get jobs:", error);
     res
       .status(500)
       .json({ error: "Failed to get jobs", message: error.message });
@@ -216,17 +244,17 @@ router.delete("/job/:jobId", authenticate, async (req, res) => {
         const bullJob = bullJobs.find((j) => j.data.jobId === jobId);
         if (bullJob) {
           await bullJob.remove();
-          console.log(`🗑️ Removed job ${jobId} from queue`);
+          console.log(`Removed job ${jobId} from queue`);
         }
       } catch (queueError) {
-        console.warn("⚠️ Could not remove from queue:", queueError.message);
+        console.warn("Could not remove from queue:", queueError.message);
       }
     }
 
     await JobManager.setJobError(jobId, "Job cancelled by user");
     res.json({ success: true, message: "Job cancelled successfully" });
   } catch (error) {
-    console.error("❌ Failed to cancel job:", error);
+    console.error("Failed to cancel job:", error);
     res
       .status(500)
       .json({ error: "Failed to cancel job", message: error.message });
@@ -250,10 +278,12 @@ router.post("/job/:jobId/retry", authenticate, async (req, res) => {
     await JobManager.updateJobStatus(jobId, "queued");
     await JobManager.updateJobProgress(jobId, 0);
 
-    // Get videoName from metadata
+    // Get videoName, environment, and callback from metadata
     const videoName =
       job.metadata?.videoName ||
       basename(job.original_key, extname(job.original_key));
+    const environment = job.metadata?.environment || "production";
+    const callbackUrl = job.metadata?.callbackUrl || null;
 
     await QueueManager.addTranscodingJob(
       jobId,
@@ -261,12 +291,14 @@ router.post("/job/:jobId/retry", authenticate, async (req, res) => {
       job.resolutions,
       0,
       videoName,
+      environment,
+      callbackUrl,
     );
 
-    console.log(`🔄 Retrying job: ${jobId}`);
+    console.log(`Retrying job: ${jobId}`);
     res.json({ success: true, message: "Job queued for retry" });
   } catch (error) {
-    console.error("❌ Failed to retry job:", error);
+    console.error("Failed to retry job:", error);
     res
       .status(500)
       .json({ error: "Failed to retry job", message: error.message });
@@ -296,7 +328,7 @@ router.get("/queue/stats", async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("❌ Failed to get queue stats:", error);
+    console.error("Failed to get queue stats:", error);
     res
       .status(500)
       .json({ error: "Failed to get queue stats", message: error.message });
@@ -340,7 +372,6 @@ router.get("/queue/status", async (req, res) => {
   }
 });
 
-// Updated to support bucket selection
 router.get("/files/:fileName/info", async (req, res) => {
   try {
     const fileName = req.params.fileName;
@@ -372,7 +403,7 @@ router.get("/files/:fileName/info", async (req, res) => {
 });
 
 router.post("/test/callback", (req, res) => {
-  console.log("📞 Received test callback:", JSON.stringify(req.body, null, 2));
+  console.log("Received test callback:", JSON.stringify(req.body, null, 2));
   res.json({
     success: true,
     message: "Callback received",

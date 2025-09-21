@@ -174,6 +174,28 @@
         Video Transcoding Service
       </a>
       <div class="navbar-nav ms-auto">
+        <div class="dropdown me-3">
+          <button class="btn btn-outline-light btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">
+            <i class="fas fa-user me-1"></i>
+            Admin
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li>
+              <h6 class="dropdown-header">Logged in as Admin</h6>
+            </li>
+            <li>
+              <hr class="dropdown-divider">
+            </li>
+            <li>
+              <form method="POST" action="/logout" style="margin: 0;">
+                <button type="submit" class="dropdown-item text-danger">
+                  <i class="fas fa-sign-out-alt me-2"></i>
+                  Logout
+                </button>
+              </form>
+            </li>
+          </ul>
+        </div>
         <span class="navbar-text">
           <i class="fas fa-clock me-1"></i>
           <span id="current-time">
@@ -325,20 +347,24 @@
                       <th>Job ID</th>
                       <th>File</th>
                       <th>Video Name</th>
+                      <th>Environment</th>
                       <th>Status</th>
                       <th>Progress</th>
                       <th>Resolutions</th>
                       <th>Created</th>
                       <th>Duration</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     <% recentJobs.forEach(function(job) { %>
                       <tr class="job-row">
                         <td>
-                          <small class="font-monospace text-primary">
-                            <%= job.job_id.substring(0, 8) %>...
-                          </small>
+                          <a href="/job/<%= job.job_id %>" class="text-decoration-none">
+                            <small class="font-monospace text-primary">
+                              <%= job.job_id.substring(0, 8) %>...
+                            </small>
+                          </a>
                         </td>
                         <td>
                           <small>
@@ -353,6 +379,13 @@
                             <% } else { %>
                               <span class="text-muted">-</span>
                               <% } %>
+                        </td>
+                        <td>
+                          <% const environment=(job.metadata && job.metadata.environment) || 'production' ; const
+                            envClass=environment==='staging' ? 'warning' : 'success' ; %>
+                            <span class="badge bg-<%= envClass %>">
+                              <%= environment %>
+                            </span>
                         </td>
                         <td>
                           <% let statusClass='secondary' ; let statusIcon='fas fa-question' ; switch(job.status) {
@@ -406,6 +439,20 @@
                               <span class="text-muted">-</span>
                               <% } %>
                         </td>
+                        <td>
+                          <div class="btn-group btn-group-sm">
+                            <a href="/job/<%= job.job_id %>" class="btn btn-outline-primary btn-sm"
+                              title="View Details">
+                              <i class="fas fa-eye"></i>
+                            </a>
+                            <% if (job.status==='completed' || job.status==='failed' ) { %>
+                              <button class="btn btn-outline-danger btn-sm"
+                                onclick="deleteJob('<%= job.job_id %>', this)" title="Delete Job">
+                                <i class="fas fa-trash"></i>
+                              </button>
+                              <% } %>
+                          </div>
+                        </td>
                       </tr>
                       <% }); %>
                   </tbody>
@@ -446,6 +493,7 @@
       icon.classList.add('fa-spin');
       btn.disabled = true;
 
+      // Reload the page to get fresh data
       setTimeout(() => {
         window.location.reload();
       }, 500);
@@ -465,13 +513,16 @@
       }
     }
 
+    // Update time every second
     setInterval(updateTime, 1000);
 
+    // Double-click refresh button to toggle auto-refresh
     document.getElementById('refresh-btn').addEventListener('dblclick', function (e) {
       e.preventDefault();
       toggleAutoRefresh();
     });
 
+    // Prevent single click when double-clicking
     let clickTimeout;
     document.getElementById('refresh-btn').addEventListener('click', function (e) {
       clearTimeout(clickTimeout);
@@ -482,10 +533,70 @@
       }, 200);
     });
 
+    // Initialize tooltips
     var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
     var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
       return new bootstrap.Tooltip(tooltipTriggerEl);
     });
+
+    function deleteJob(jobId, buttonElement) {
+      if (confirm('Are you sure you want to delete this job? This action cannot be undone.')) {
+        const originalHtml = buttonElement.innerHTML;
+        buttonElement.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        buttonElement.disabled = true;
+
+        fetch(`/api/job/${jobId}`, {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              // Remove the row from the table
+              const row = buttonElement.closest('tr');
+              row.style.transition = 'opacity 0.3s';
+              row.style.opacity = '0';
+              setTimeout(() => {
+                row.remove();
+              }, 300);
+
+              // Show success message
+              showAlert('Job deleted successfully', 'success');
+            } else {
+              showAlert('Failed to delete job: ' + data.error, 'danger');
+              buttonElement.innerHTML = originalHtml;
+              buttonElement.disabled = false;
+            }
+          })
+          .catch(error => {
+            showAlert('Failed to delete job: ' + error.message, 'danger');
+            buttonElement.innerHTML = originalHtml;
+            buttonElement.disabled = false;
+          });
+      }
+    }
+
+    function showAlert(message, type) {
+      // Create alert element
+      const alertDiv = document.createElement('div');
+      alertDiv.className = `alert alert-${type} alert-dismissible fade show position-fixed`;
+      alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+      alertDiv.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+
+      document.body.appendChild(alertDiv);
+
+      // Auto-remove after 5 seconds
+      setTimeout(() => {
+        if (alertDiv.parentNode) {
+          alertDiv.remove();
+        }
+      }, 5000);
+    }
   </script>
 </body>
 

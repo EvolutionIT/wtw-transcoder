@@ -2,7 +2,6 @@ import B2 from "backblaze-b2";
 import { createWriteStream, readFileSync, statSync } from "fs";
 import { basename, extname } from "path";
 
-// Bucket types enum for clarity
 const BUCKET_TYPES = {
   ORIGINAL_VIDEO: "ov",
   HLS_OUTPUT: "hls",
@@ -17,7 +16,6 @@ class B2Service {
     this.authorized = false;
     this.authPromise = null;
 
-    // Bucket configurations
     this.buckets = {
       [BUCKET_TYPES.ORIGINAL_VIDEO]: {
         id: process.env.B2_OV_BUCKET_ID,
@@ -29,7 +27,6 @@ class B2Service {
       },
     };
 
-    // Validate bucket configurations
     this.validateBucketConfig();
   }
 
@@ -77,9 +74,9 @@ class B2Service {
     try {
       await this.b2.authorize();
       this.authorized = true;
-      console.log("✅ BackBlaze B2 authorized successfully");
+      console.log("BackBlaze B2 authorized successfully");
     } catch (error) {
-      console.error("❌ B2 authorization failed:", error.message);
+      console.error("B2 authorization failed:", error.message);
       this.authorized = false;
       throw new Error(`B2 authorization failed: ${error.message}`);
     } finally {
@@ -96,46 +93,38 @@ class B2Service {
       await this.authorize();
 
       const bucket = this.getBucketConfig(bucketType);
-      console.log(
-        `⬇️ Downloading ${fileName} from B2 bucket ${bucket.name}...`,
-      );
-
       const downloadAuth = await this.b2.getDownloadAuthorization({
         bucketId: bucket.id,
         fileNamePrefix: fileName,
         validDurationInSeconds: 3600, // 1 hour
       });
-
-      // Download file
       const response = await this.b2.downloadFileByName({
         bucketName: bucket.name,
         fileName: fileName,
         responseType: "stream",
       });
-
-      // Create write stream
       const writeStream = createWriteStream(localPath);
 
       return new Promise((resolve, reject) => {
         response.data.pipe(writeStream);
 
         writeStream.on("finish", () => {
-          console.log(`✅ Downloaded ${fileName} to ${localPath}`);
+          console.log(`Downloaded ${fileName} to ${localPath}`);
           resolve(localPath);
         });
 
         writeStream.on("error", (error) => {
-          console.error(`❌ Download failed for ${fileName}:`, error);
+          console.error(`Download failed for ${fileName}:`, error);
           reject(error);
         });
 
         response.data.on("error", (error) => {
-          console.error(`❌ Stream error for ${fileName}:`, error);
+          console.error(`Stream error for ${fileName}:`, error);
           reject(error);
         });
       });
     } catch (error) {
-      console.error(`❌ Failed to download ${fileName}:`, error.message);
+      console.error(`Failed to download ${fileName}:`, error.message);
       throw error;
     }
   }
@@ -151,25 +140,22 @@ class B2Service {
 
       const bucket = this.getBucketConfig(bucketType);
       console.log(
-        `⬆️ Uploading ${localFilePath} to B2 bucket ${bucket.name} as ${remoteFileName}...`,
+        `Uploading ${localFilePath} to B2 bucket ${bucket.name} as ${remoteFileName}...`,
       );
 
-      // Get upload URL
       const uploadUrl = await this.b2.getUploadUrl({
         bucketId: bucket.id,
       });
 
-      // Read file
       const fileData = readFileSync(localFilePath);
       const fileSize = statSync(localFilePath).size;
 
-      // Upload file
       const response = await this.b2.uploadFile({
         uploadUrl: uploadUrl.data.uploadUrl,
         uploadAuthToken: uploadUrl.data.authorizationToken,
         fileName: remoteFileName,
         data: fileData,
-        hash: null, // Let B2 calculate the hash
+        hash: null,
         info: {
           src_last_modified_millis: Date.now().toString(),
         },
@@ -177,7 +163,7 @@ class B2Service {
       });
 
       console.log(
-        `✅ Uploaded ${remoteFileName} (${this.formatFileSize(fileSize)}) to ${bucket.name}`,
+        `Uploaded ${remoteFileName} (${this.formatFileSize(fileSize)}) to ${bucket.name}`,
       );
 
       return {
@@ -190,7 +176,7 @@ class B2Service {
         bucketName: bucket.name,
       };
     } catch (error) {
-      console.error(`❌ Failed to upload ${localFilePath}:`, error.message);
+      console.error(`Failed to upload ${localFilePath}:`, error.message);
       throw error;
     }
   }
@@ -230,9 +216,8 @@ class B2Service {
       await this.authorize();
 
       const bucket = this.getBucketConfig(bucketType);
-      console.log(`🗑️ Deleting ${fileName} from B2 bucket ${bucket.name}...`);
+      console.log(`Deleting ${fileName} from B2 bucket ${bucket.name}...`);
 
-      // First, get file info
       const fileInfo = await this.b2.listFileNames({
         bucketId: bucket.id,
         startFileName: fileName,
@@ -243,24 +228,21 @@ class B2Service {
         fileInfo.data.files.length === 0 ||
         fileInfo.data.files[0].fileName !== fileName
       ) {
-        console.warn(
-          `⚠️ File ${fileName} not found in B2 bucket ${bucket.name}`,
-        );
+        console.warn(`File ${fileName} not found in B2 bucket ${bucket.name}`);
         return false;
       }
 
       const file = fileInfo.data.files[0];
 
-      // Delete the file
       await this.b2.deleteFileVersion({
         fileId: file.fileId,
         fileName: file.fileName,
       });
 
-      console.log(`🗑️ Deleted ${fileName} from B2 bucket ${bucket.name}`);
+      console.log(`Deleted ${fileName} from B2 bucket ${bucket.name}`);
       return true;
     } catch (error) {
-      console.error(`❌ Failed to delete ${fileName}:`, error.message);
+      console.error(`Failed to delete ${fileName}:`, error.message);
       throw error;
     }
   }
@@ -291,7 +273,7 @@ class B2Service {
         bucketName: bucket.name,
       }));
     } catch (error) {
-      console.error("❌ Failed to list files:", error.message);
+      console.error("Failed to list files:", error.message);
       throw error;
     }
   }
@@ -327,10 +309,7 @@ class B2Service {
         bucketName: bucket.name,
       };
     } catch (error) {
-      console.error(
-        `❌ Failed to get file info for ${fileName}:`,
-        error.message,
-      );
+      console.error(`Failed to get file info for ${fileName}:`, error.message);
       return null;
     }
   }
@@ -348,16 +327,13 @@ class B2Service {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   }
 
-  // Helper method to generate organized file paths
   generateOutputPath(originalKey, resolution, segmentNumber = null) {
     const baseName = basename(originalKey, extname(originalKey));
     const timestamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
     if (segmentNumber !== null) {
-      // For HLS segments
       return `transcoded/${timestamp}/${baseName}/${resolution}/segment_${segmentNumber}.ts`;
     } else {
-      // For playlist files
       return `transcoded/${timestamp}/${baseName}/${resolution}/playlist.m3u8`;
     }
   }
@@ -369,7 +345,6 @@ class B2Service {
   }
 }
 
-// Singleton instance
 let b2Service = null;
 
 function getB2Service() {
