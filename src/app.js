@@ -3,10 +3,15 @@ import session from "express-session";
 import { join } from "path";
 import { static as static_ } from "express";
 
+// Import middleware
+import { requireAuth } from "./middleware/auth.js";
+
+// Import routes
 import transcodingRoutes from "./routes/transcoding.js";
 import dashboardRoutes from "./routes/dashboard.js";
 import authRoutes from "./routes/auth.js";
 
+// Import services
 import { initializeDatabase } from "./services/database.js";
 import { initializeQueue } from "./services/queue.js";
 
@@ -27,10 +32,12 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: process.env.NODE_ENV === "production", // Use HTTPS in production
+      secure:
+        process.env.NODE_ENV === "production" && process.env.HTTPS === "true",
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      maxAge: 24 * 60 * 60 * 1000,
     },
+    name: "transcoder.sid",
   }),
 );
 
@@ -57,9 +64,27 @@ app.use((req, res, next) => {
   next();
 });
 
+const publicRoutes = ["/login", "/auth/status", "/auth/clear", "/health"];
+const apiRoutes = ["/api"]; // API routes use different auth
+
+app.use((req, res, next) => {
+  if (publicRoutes.some((route) => req.path === route)) {
+    return next();
+  }
+
+  if (apiRoutes.some((route) => req.path.startsWith(route))) {
+    return next();
+  }
+
+  if (req.path.startsWith("/static")) {
+    return next();
+  }
+
+  return requireAuth(req, res, next);
+});
+
 app.use("/", authRoutes);
 app.use("/api/transcode", transcodingRoutes);
-app.use("/", dashboardRoutes);
 
 app.get("/health", (req, res) => {
   res.json({
@@ -68,6 +93,8 @@ app.get("/health", (req, res) => {
     uptime: process.uptime(),
   });
 });
+
+app.use("/", dashboardRoutes);
 
 app.use((req, res) => {
   res.status(404).render("error", {
@@ -111,6 +138,10 @@ async function startServer() {
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
+
+      if (process.env.NODE_ENV !== "production") {
+        console.log(`API: http://localhost:${PORT}/api/transcode`);
+      }
     });
   } catch (error) {
     console.error("Failed to start server:", error);
@@ -118,6 +149,7 @@ async function startServer() {
   }
 }
 
+// Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("Received SIGTERM, shutting down gracefully...");
   process.exit(0);

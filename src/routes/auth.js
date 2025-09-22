@@ -9,15 +9,17 @@ import {
 
 const router = Router();
 
+const publicRoutes = ["/login", "/auth/status", "/auth/clear", "/health"];
+
 router.get("/login", (req, res) => {
-  if (req.session && req.session.authenticated) {
+  if (req.session && req.session.authenticated === true) {
     return res.redirect("/");
   }
 
   res.render("login", {
     title: "Login - Video Transcoding Service",
     error: null,
-    returnTo: req.session.returnTo || "/",
+    returnTo: req.session?.returnTo || "/",
   });
 });
 
@@ -63,13 +65,22 @@ router.post("/login", loginLimiter, bruteForceProtection, async (req, res) => {
 
     req.session.authenticated = true;
     req.session.loginTime = new Date().toISOString();
+    req.session.user = "admin"; // Explicit user identifier
 
-    console.log(`Successful login from ${ip} at ${new Date().toISOString()}`);
+    req.session.save((err) => {
+      if (err) {
+        return res.render("login", {
+          title: "Login - Video Transcoding Service",
+          error: "Session error, please try again",
+          returnTo: returnTo || "/",
+        });
+      }
 
-    const redirectTo = returnTo || req.session.returnTo || "/";
-    delete req.session.returnTo;
+      const redirectTo = returnTo || req.session.returnTo || "/";
+      delete req.session.returnTo;
 
-    res.redirect(redirectTo);
+      res.redirect(redirectTo);
+    });
   } else {
     recordFailedAttempt(ip);
 
@@ -89,7 +100,6 @@ router.post("/logout", (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
 
   if (req.session) {
-    console.log(`User logged out from ${ip} at ${new Date().toISOString()}`);
     req.session.destroy((err) => {
       if (err) {
         console.error("Error destroying session:", err);
@@ -102,16 +112,27 @@ router.post("/logout", (req, res) => {
 });
 
 router.get("/auth/status", (req, res) => {
-  if (req.session && req.session.authenticated) {
-    res.json({
-      authenticated: true,
-      loginTime: req.session.loginTime,
-      sessionId: req.sessionID,
+  res.json({
+    hasSession: !!req.session,
+    sessionId: req.sessionID,
+    authenticated: req.session?.authenticated,
+    loginTime: req.session?.loginTime,
+    user: req.session?.user,
+    sessionData: req.session,
+  });
+});
+
+router.get("/auth/clear", (req, res) => {
+  if (req.session) {
+    req.session.destroy((err) => {
+      if (err) {
+        console.error("Error destroying session:", err);
+        return res.json({ error: "Failed to clear session" });
+      }
+      res.json({ message: "Session cleared" });
     });
   } else {
-    res.json({
-      authenticated: false,
-    });
+    res.json({ message: "No session to clear" });
   }
 });
 

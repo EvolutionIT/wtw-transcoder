@@ -164,7 +164,7 @@ router.get("/logs", async (req, res) => {
 router.get("/api/job/:jobId/logs", async (req, res) => {
   try {
     const { jobId } = req.params;
-    const since = req.query.since; // ISO timestamp
+    const since = req.query.since;
 
     let logs = await JobManager.getJobLogs(jobId);
 
@@ -179,6 +179,7 @@ router.get("/api/job/:jobId/logs", async (req, res) => {
       count: logs.length,
     });
   } catch (error) {
+    console.error("Job logs API error:", error);
     res.status(500).json({
       success: false,
       error: error.message,
