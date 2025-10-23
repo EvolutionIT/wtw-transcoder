@@ -638,11 +638,10 @@
 
     function retryJob() {
       if (confirm('Are you sure you want to retry this job?')) {
-        fetch(`/api/transcode/job/<%= job.job_id %>/retry`, {
+        fetch(`/api/job/<%= job.job_id %>/retry`, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': 'your-api-key' // You'll need to handle auth
+            'Content-Type': 'application/json'
           }
         })
           .then(response => response.json())

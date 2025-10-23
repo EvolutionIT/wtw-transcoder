@@ -1,9 +1,13 @@
 import { Router } from "express";
+import { basename, extname } from "path";
 import { JobManager, LOG_LEVELS } from "../services/database.js";
 import { QueueManager } from "../services/queue.js";
 
 const router = Router();
 
+// Note: Authentication middleware is now applied at the app level, not here
+
+// Dashboard home
 router.get("/", async (req, res) => {
   try {
     const [recentJobs, jobCounts, queueStats] = await Promise.all([
@@ -20,7 +24,7 @@ router.get("/", async (req, res) => {
       currentTime: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Dashboard error:", error);
+    console.error("❌ Dashboard error:", error);
     res.render("error", {
       title: "Error",
       error: error.message,
@@ -29,6 +33,7 @@ router.get("/", async (req, res) => {
   }
 });
 
+// Job details page
 router.get("/job/:jobId", async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -43,6 +48,7 @@ router.get("/job/:jobId", async (req, res) => {
       });
     }
 
+    // Get additional queue info if job is still in queue
     let queueInfo = null;
     if (job.status === "queued" || job.status === "processing") {
       try {
@@ -71,7 +77,7 @@ router.get("/job/:jobId", async (req, res) => {
       currentTime: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Job details error:", error);
+    console.error("❌ Job details error:", error);
     res.render("error", {
       title: "Error",
       error: error.message,
@@ -80,6 +86,7 @@ router.get("/job/:jobId", async (req, res) => {
   }
 });
 
+// Jobs list page
 router.get("/jobs", async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -120,7 +127,7 @@ router.get("/jobs", async (req, res) => {
       currentTime: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Jobs list error:", error);
+    console.error("❌ Jobs list error:", error);
     res.render("error", {
       title: "Error",
       error: error.message,
@@ -129,6 +136,7 @@ router.get("/jobs", async (req, res) => {
   }
 });
 
+// Logs page
 router.get("/logs", async (req, res) => {
   try {
     const level = req.query.level;
@@ -152,7 +160,7 @@ router.get("/logs", async (req, res) => {
       currentTime: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Logs error:", error);
+    console.error("❌ Logs error:", error);
     res.render("error", {
       title: "Error",
       error: error.message,
@@ -161,10 +169,11 @@ router.get("/logs", async (req, res) => {
   }
 });
 
+// API endpoint for job logs (for AJAX updates)
 router.get("/api/job/:jobId/logs", async (req, res) => {
   try {
     const { jobId } = req.params;
-    const since = req.query.since;
+    const since = req.query.since; // ISO timestamp
 
     let logs = await JobManager.getJobLogs(jobId);
 
@@ -179,7 +188,7 @@ router.get("/api/job/:jobId/logs", async (req, res) => {
       count: logs.length,
     });
   } catch (error) {
-    console.error("Job logs API error:", error);
+    console.error("❌ Job logs API error:", error);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -187,6 +196,7 @@ router.get("/api/job/:jobId/logs", async (req, res) => {
   }
 });
 
+// API endpoint for deleting completed/failed jobs
 router.delete("/api/job/:jobId", async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -200,6 +210,7 @@ router.delete("/api/job/:jobId", async (req, res) => {
       });
     }
 
+    // Only allow deletion of completed or failed jobs
     if (!["completed", "failed"].includes(job.status)) {
       return res.status(400).json({
         success: false,
@@ -207,26 +218,35 @@ router.delete("/api/job/:jobId", async (req, res) => {
       });
     }
 
+    // Remove from queue if it exists there
     try {
       const queue = QueueManager.getQueue();
       const bullJobs = await queue.getJobs(["completed", "failed"]);
       const bullJob = bullJobs.find((j) => j.data.jobId === jobId);
       if (bullJob) {
         await bullJob.remove();
-        console.log(`Removed job ${jobId} from queue`);
+        console.log(`🗑️ Removed job ${jobId} from queue`);
       }
     } catch (queueError) {
-      console.warn("Could not remove from queue:", queueError.message);
+      console.warn("⚠️ Could not remove from queue:", queueError.message);
     }
 
+    // Delete from database
     await JobManager.deleteJob(jobId);
+
+    await JobManager.addJobLog(
+      jobId,
+      "info",
+      "Job deleted by user",
+      "deletion",
+    );
 
     res.json({
       success: true,
       message: "Job deleted successfully",
     });
   } catch (error) {
-    console.error("Failed to delete job:", error);
+    console.error("❌ Failed to delete job:", error);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -234,6 +254,64 @@ router.delete("/api/job/:jobId", async (req, res) => {
   }
 });
 
+// API endpoint for retrying failed jobs
+router.post("/api/job/:jobId/retry", async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    const job = await JobManager.getJob(jobId);
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        error: "Job not found",
+      });
+    }
+
+    if (job.status !== "failed") {
+      return res.status(400).json({
+        success: false,
+        error: "Only failed jobs can be retried",
+      });
+    }
+
+    // Reset job status
+    await JobManager.updateJobStatus(jobId, "queued");
+    await JobManager.updateJobProgress(jobId, 0);
+
+    // Get job details from metadata
+    const videoName =
+      job.metadata?.videoName ||
+      basename(job.original_key, extname(job.original_key));
+    const environment = job.metadata?.environment || "production";
+    const callbackUrl = job.metadata?.callbackUrl || null;
+
+    await QueueManager.addTranscodingJob(
+      jobId,
+      job.original_key,
+      job.resolutions,
+      0,
+      videoName,
+      environment,
+      callbackUrl,
+    );
+
+    console.log(`🔄 Retrying job: ${jobId}`);
+
+    res.json({
+      success: true,
+      message: "Job queued for retry",
+    });
+  } catch (error) {
+    console.error("❌ Failed to retry job:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// API endpoint for job status (for AJAX updates)
 router.get("/api/job/:jobId/status", async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -259,7 +337,7 @@ router.get("/api/job/:jobId/status", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Job status API error:", error);
+    console.error("❌ Job status API error:", error);
     res.status(500).json({
       success: false,
       error: error.message,

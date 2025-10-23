@@ -8,11 +8,67 @@ import {
   rmSync,
   writeFileSync,
   readFileSync,
+  statSync,
 } from "fs";
 import { getB2Service, BUCKET_TYPES } from "../services/b2.js";
 import { JobManager, LOG_LEVELS } from "../services/database.js";
 import axios from "axios";
 
+// Format validation helpers (inline for simplicity)
+const SUPPORTED_VIDEO_FORMATS = [
+  ".mp4",
+  ".m4v",
+  ".mov",
+  ".avi",
+  ".mkv",
+  ".webm",
+  ".wmv",
+  ".flv",
+  ".f4v",
+  ".mpg",
+  ".mpeg",
+  ".m2v",
+  ".mxf",
+  ".mts",
+  ".m2ts",
+  ".ts",
+  ".3gp",
+  ".3g2",
+  ".ogv",
+  ".vob",
+  ".asf",
+  ".rm",
+  ".rmvb",
+  ".divx",
+];
+
+const getFormatSpecificOptions = (filename) => {
+  const ext = extname(filename).toLowerCase();
+
+  switch (ext) {
+    case ".flv":
+      return ["-fflags", "+genpts", "-avoid_negative_ts", "make_zero"];
+    case ".wmv":
+    case ".asf":
+      return ["-fflags", "+genpts"];
+    case ".mts":
+    case ".m2ts":
+      return [
+        "-fflags",
+        "+genpts",
+        "-analyzeduration",
+        "100M",
+        "-probesize",
+        "100M",
+      ];
+    case ".vob":
+      return ["-fflags", "+genpts", "-analyzeduration", "100M"];
+    default:
+      return [];
+  }
+};
+
+// Job stages for tracking progress
 const JOB_STAGES = {
   INITIALIZED: "initialized",
   DOWNLOADED: "downloaded",
@@ -24,6 +80,7 @@ const JOB_STAGES = {
   FAILED: "failed",
 };
 
+// Resolution configurations with codec profiles to match AWS ETS
 const RESOLUTION_CONFIGS = {
   "1080p": {
     width: 1920,
@@ -95,7 +152,7 @@ class JobStateManager {
         return JSON.parse(data);
       }
     } catch (error) {
-      console.warn(`Could not load job state: ${error.message}`);
+      console.warn(`⚠️ Could not load job state: ${error.message}`);
     }
 
     return {
@@ -121,7 +178,7 @@ class JobStateManager {
       }
       writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2));
     } catch (error) {
-      console.warn(`Could not save job state: ${error.message}`);
+      console.warn(`⚠️ Could not save job state: ${error.message}`);
     }
   }
 
@@ -173,12 +230,14 @@ async function transcodingWorker(job) {
     callbackUrl,
   } = job.data;
 
+  // Use videoName from API, or fallback to originalKey basename
   const outputVideoName =
     videoName || basename(originalKey, extname(originalKey));
 
   const tempDir = join(process.env.TEMP_UPLOAD_DIR || "./uploads", jobId);
   const b2Service = getB2Service();
 
+  // Create temporary directory first
   if (!existsSync(tempDir)) {
     mkdirSync(tempDir, { recursive: true });
   }
@@ -202,6 +261,31 @@ async function transcodingWorker(job) {
       },
     );
 
+    // Validate file format
+    const fileExt = extname(originalKey).toLowerCase();
+    const isSupported = SUPPORTED_VIDEO_FORMATS.includes(fileExt);
+
+    if (!isSupported) {
+      await JobManager.addJobLog(
+        jobId,
+        LOG_LEVELS.WARN,
+        `Unsupported file format: ${fileExt}. Processing may fail.`,
+        "validation",
+        {
+          extension: fileExt,
+          supportedFormats: SUPPORTED_VIDEO_FORMATS.join(", "),
+        },
+      );
+    } else {
+      await JobManager.addJobLog(
+        jobId,
+        LOG_LEVELS.INFO,
+        `File format ${fileExt} is supported`,
+        "validation",
+      );
+    }
+
+    // Check if job was already completed
     if (stateManager.state.stage === JOB_STAGES.COMPLETED) {
       await JobManager.addJobLog(
         jobId,
@@ -223,6 +307,7 @@ async function transcodingWorker(job) {
 
     stateManager.updateStage(JOB_STAGES.INITIALIZED, { outputVideoName });
 
+    // Stage 1: Download original file (skip if already downloaded)
     if (!stateManager.isStageCompleted(JOB_STAGES.DOWNLOADED)) {
       job.progress(5);
       await JobManager.addJobLog(
@@ -235,6 +320,7 @@ async function transcodingWorker(job) {
       const originalFileName = basename(originalKey);
       downloadedFile = join(tempDir, originalFileName);
 
+      // Check if file already exists from previous run
       if (!existsSync(downloadedFile)) {
         try {
           await b2Service.downloadFile(
@@ -293,6 +379,7 @@ async function transcodingWorker(job) {
       );
     }
 
+    // Stage 2: Get video information (skip if already analyzed)
     if (!stateManager.isStageCompleted(JOB_STAGES.ANALYZED)) {
       job.progress(10);
       await JobManager.addJobLog(
@@ -319,6 +406,7 @@ async function transcodingWorker(job) {
           },
         );
 
+        // Filter resolutions based on source video
         const validResolutions = filterValidResolutions(resolutions, videoInfo);
         await JobManager.addJobLog(
           jobId,
@@ -377,6 +465,7 @@ async function transcodingWorker(job) {
 
     const { videoInfo, validResolutions } = stateManager.state;
 
+    // Stage 3: Generate thumbnails (skip if already generated)
     if (!stateManager.isStageCompleted(JOB_STAGES.THUMBNAILS_GENERATED)) {
       job.progress(12);
       await JobManager.addJobLog(
@@ -414,6 +503,7 @@ async function transcodingWorker(job) {
             error: thumbnailError.message,
           },
         );
+        // Continue without thumbnails
         stateManager.updateStage(JOB_STAGES.THUMBNAILS_GENERATED, {
           thumbnailPaths: [],
         });
@@ -427,10 +517,14 @@ async function transcodingWorker(job) {
       );
     }
 
+    // Stage 4: Transcode to multiple resolutions (resume incomplete resolutions)
     const progressPerResolution = 65 / validResolutions.length;
     let currentProgress = 15;
 
     const transcodedFiles = [];
+    const baseName = basename(originalKey, extname(originalKey));
+    const timestamp = new Date().toISOString().slice(0, 10);
+    const baseOutputPath = `transcoded/${timestamp}/${baseName}`;
 
     for (let i = 0; i < validResolutions.length; i++) {
       const resolution = validResolutions[i];
@@ -444,21 +538,13 @@ async function transcodingWorker(job) {
         );
         currentProgress += progressPerResolution;
         job.progress(Math.round(currentProgress));
-
-        const resolutionDir = join(tempDir, `hls_${resolution}`);
-        const playlistPath = join(resolutionDir, "index-.m3u8");
-        transcodedFiles.push({
-          resolution,
-          playlistPath,
-          segmentsDir: resolutionDir,
-        });
         continue;
       }
 
       await JobManager.addJobLog(
         jobId,
         LOG_LEVELS.INFO,
-        `Starting transcoding to ${resolution}`,
+        `Starting ${resolution} transcoding`,
         "transcoding",
         {
           resolution,
@@ -474,6 +560,7 @@ async function transcodingWorker(job) {
       const playlistPath = join(resolutionDir, "index-.m3u8");
 
       try {
+        // STEP 1: Transcode this resolution
         await transcodeToHLS(
           downloadedFile,
           playlistPath,
@@ -481,7 +568,7 @@ async function transcodingWorker(job) {
           jobId,
           (progress) => {
             const totalProgress =
-              currentProgress + (progress * progressPerResolution) / 100;
+              currentProgress + (progress * progressPerResolution * 0.5) / 100; // 50% for transcode
             job.progress(Math.round(totalProgress));
           },
         );
@@ -489,7 +576,7 @@ async function transcodingWorker(job) {
         await JobManager.addJobLog(
           jobId,
           LOG_LEVELS.INFO,
-          `Successfully transcoded to ${resolution}`,
+          `Transcoding complete for ${resolution}`,
           "transcoding",
           {
             resolution,
@@ -497,18 +584,106 @@ async function transcodingWorker(job) {
           },
         );
 
+        // STEP 2: Immediately upload all files for this resolution
+        await JobManager.addJobLog(
+          jobId,
+          LOG_LEVELS.INFO,
+          `Uploading ${resolution} files to B2`,
+          "upload",
+        );
+
+        // Upload playlist
+        const playlistKey = `${outputVideoName}/hls_${resolution}/index-.m3u8`;
+        await b2Service.uploadFile(
+          playlistPath,
+          playlistKey,
+          "application/x-mpegURL",
+          BUCKET_TYPES.HLS_OUTPUT,
+        );
+        stateManager.addUploadedFile(basename(playlistPath), playlistKey);
+        await JobManager.addJobLog(
+          jobId,
+          LOG_LEVELS.DEBUG,
+          `Uploaded playlist: ${playlistKey}`,
+          "upload",
+        );
+
+        // Upload all segment files
+        const segmentFiles = readdirSync(resolutionDir).filter((file) =>
+          file.endsWith(".ts"),
+        );
+
+        let uploadedSegments = 0;
+        for (const segmentFile of segmentFiles) {
+          const segmentPath = join(resolutionDir, segmentFile);
+          const segmentKey = `${outputVideoName}/hls_${resolution}/${segmentFile}`;
+
+          await b2Service.uploadFile(
+            segmentPath,
+            segmentKey,
+            "video/mp2t",
+            BUCKET_TYPES.HLS_OUTPUT,
+          );
+          stateManager.addUploadedFile(segmentFile, segmentKey);
+          uploadedSegments++;
+
+          // Update progress for uploads
+          const uploadProgress =
+            currentProgress +
+            progressPerResolution * 0.5 +
+            (uploadedSegments / segmentFiles.length) *
+              progressPerResolution *
+              0.5;
+          job.progress(Math.round(uploadProgress));
+        }
+
+        await JobManager.addJobLog(
+          jobId,
+          LOG_LEVELS.INFO,
+          `Uploaded ${segmentFiles.length} segments for ${resolution}`,
+          "upload",
+        );
+
+        // STEP 3: Immediately delete the entire resolution directory
+        await JobManager.addJobLog(
+          jobId,
+          LOG_LEVELS.INFO,
+          `Deleting local files for ${resolution}`,
+          "cleanup",
+        );
+
+        const resolutionSize = getDirectorySize(resolutionDir);
+        rmSync(resolutionDir, { recursive: true, force: true });
+
+        await JobManager.addJobLog(
+          jobId,
+          LOG_LEVELS.INFO,
+          `Freed ${(resolutionSize / 1024 / 1024).toFixed(2)}MB from ${resolution}`,
+          "cleanup",
+          {
+            resolution,
+            sizeBytes: resolutionSize,
+            sizeMB: (resolutionSize / 1024 / 1024).toFixed(2),
+          },
+        );
+
+        console.log(
+          `🧹 Deleted ${resolution} files (${(resolutionSize / 1024 / 1024).toFixed(2)}MB freed)`,
+        );
+
+        // Mark this resolution as completed
+        stateManager.addCompletedResolution(resolution);
+
         transcodedFiles.push({
           resolution,
-          playlistPath,
-          segmentsDir: resolutionDir,
+          playlistPath: null, // Already deleted
+          segmentsDir: null, // Already deleted
         });
-
-        stateManager.addCompletedResolution(resolution);
       } catch (transcodeError) {
         await JobManager.addJobLog(
           jobId,
           LOG_LEVELS.ERROR,
-          `Transcoding to ${resolution} failed: ${transcodeError.message}`,
+          `${resolution} processing failed: ${transcodeError.message}`,
           "transcoding",
           {
             resolution,
@@ -527,13 +702,14 @@ async function transcodingWorker(job) {
     await JobManager.addJobLog(
       jobId,
       LOG_LEVELS.INFO,
-      `All resolutions transcoded successfully`,
+      `All resolutions transcoded and uploaded successfully`,
       "transcoding",
       {
         completedResolutions: validResolutions,
       },
     );
 
+    // Stage 5: Create master playlist
     job.progress(82);
     await JobManager.addJobLog(
       jobId,
@@ -543,234 +719,116 @@ async function transcodingWorker(job) {
     );
 
     masterPlaylistPath = join(tempDir, "index.m3u8");
-    if (!existsSync(masterPlaylistPath)) {
-      try {
-        await createMasterPlaylist(
-          transcodedFiles,
-          masterPlaylistPath,
-          videoInfo,
-        );
-        await JobManager.addJobLog(
-          jobId,
-          LOG_LEVELS.INFO,
-          "Master playlist created successfully",
-          "playlist",
-          {
-            playlistPath: masterPlaylistPath,
-            resolutions: validResolutions,
-          },
-        );
-      } catch (playlistError) {
-        await JobManager.addJobLog(
-          jobId,
-          LOG_LEVELS.ERROR,
-          `Master playlist creation failed: ${playlistError.message}`,
-          "playlist",
-          {
-            error: playlistError.message,
-          },
-        );
-        throw playlistError;
-      }
-    } else {
+    await createMasterPlaylist(transcodedFiles, masterPlaylistPath, videoInfo);
+    await JobManager.addJobLog(
+      jobId,
+      LOG_LEVELS.INFO,
+      "Master playlist created successfully",
+      "playlist",
+      {
+        playlistPath: masterPlaylistPath,
+        resolutions: validResolutions,
+      },
+    );
+
+    // Stage 6: Upload master playlist and thumbnails
+    job.progress(85);
+    await JobManager.addJobLog(
+      jobId,
+      LOG_LEVELS.INFO,
+      "Uploading master playlist and thumbnails to HLS bucket",
+      "upload",
+    );
+
+    // Upload master playlist as index.m3u8
+    const masterPlaylistKey = `${outputVideoName}/index.m3u8`;
+    await b2Service.uploadFile(
+      masterPlaylistPath,
+      masterPlaylistKey,
+      "application/x-mpegURL",
+      BUCKET_TYPES.HLS_OUTPUT,
+    );
+    stateManager.addUploadedFile(
+      basename(masterPlaylistPath),
+      masterPlaylistKey,
+    );
+    await JobManager.addJobLog(
+      jobId,
+      LOG_LEVELS.INFO,
+      "Master playlist uploaded",
+      "upload",
+    );
+
+    // Delete master playlist immediately after upload
+    if (existsSync(masterPlaylistPath)) {
+      rmSync(masterPlaylistPath, { force: true });
       await JobManager.addJobLog(
         jobId,
-        LOG_LEVELS.INFO,
-        "Using existing master playlist",
-        "playlist",
+        LOG_LEVELS.DEBUG,
+        "Deleted master playlist from local storage",
+        "cleanup",
       );
     }
 
-    if (!stateManager.isStageCompleted(JOB_STAGES.UPLOADED)) {
-      job.progress(85);
-      await JobManager.addJobLog(
-        jobId,
-        LOG_LEVELS.INFO,
-        "Starting upload to HLS bucket",
-        "upload",
-      );
-
-      const uploadPromises = [];
-      let uploadCount = 0;
-      let skippedCount = 0;
-
-      const masterPlaylistKey = `${outputVideoName}/index.m3u8`;
-      if (!stateManager.isFileUploaded(masterPlaylistKey)) {
-        uploadPromises.push(
-          uploadFileWithTracking(
-            b2Service,
-            masterPlaylistPath,
-            masterPlaylistKey,
-            "application/x-mpegURL",
-            BUCKET_TYPES.HLS_OUTPUT,
-            stateManager,
-            jobId,
-          ),
-        );
-        uploadCount++;
-      } else {
-        await JobManager.addJobLog(
-          jobId,
-          LOG_LEVELS.INFO,
-          "Skipping master playlist upload (already uploaded)",
-          "upload",
-        );
-        skippedCount++;
-      }
-
-      for (const thumbnailPath of stateManager.state.thumbnailPaths) {
+    // Upload and delete thumbnails
+    for (const thumbnailPath of stateManager.state.thumbnailPaths) {
+      if (existsSync(thumbnailPath)) {
         const thumbnailName = basename(thumbnailPath);
         const thumbnailKey = `${outputVideoName}/${thumbnailName}`;
         const contentType = thumbnailName.endsWith(".jpg")
           ? "image/jpeg"
           : "image/png";
 
-        if (
-          !stateManager.isFileUploaded(thumbnailKey) &&
-          existsSync(thumbnailPath)
-        ) {
-          uploadPromises.push(
-            uploadFileWithTracking(
-              b2Service,
-              thumbnailPath,
-              thumbnailKey,
-              contentType,
-              BUCKET_TYPES.HLS_OUTPUT,
-              stateManager,
-              jobId,
-            ),
-          );
-          uploadCount++;
-        } else {
-          await JobManager.addJobLog(
-            jobId,
-            LOG_LEVELS.INFO,
-            `Skipping thumbnail upload: ${thumbnailName} (already uploaded)`,
-            "upload",
-          );
-          skippedCount++;
-        }
-      }
-
-      for (const transcodedFile of transcodedFiles) {
-        const { resolution, playlistPath, segmentsDir } = transcodedFile;
-
-        const playlistKey = `${outputVideoName}/hls_${resolution}/index-.m3u8`;
-        if (
-          !stateManager.isFileUploaded(playlistKey) &&
-          existsSync(playlistPath)
-        ) {
-          uploadPromises.push(
-            uploadFileWithTracking(
-              b2Service,
-              playlistPath,
-              playlistKey,
-              "application/x-mpegURL",
-              BUCKET_TYPES.HLS_OUTPUT,
-              stateManager,
-              jobId,
-            ),
-          );
-          uploadCount++;
-        } else {
-          await JobManager.addJobLog(
-            jobId,
-            LOG_LEVELS.INFO,
-            `Skipping playlist upload: ${resolution} (already uploaded)`,
-            "upload",
-          );
-          skippedCount++;
-        }
-
-        if (existsSync(segmentsDir)) {
-          const segmentFiles = readdirSync(segmentsDir).filter((file) =>
-            file.endsWith(".ts"),
-          );
-
-          for (const segmentFile of segmentFiles) {
-            const segmentPath = join(segmentsDir, segmentFile);
-            const segmentKey = `${outputVideoName}/hls_${resolution}/${segmentFile}`;
-
-            if (
-              !stateManager.isFileUploaded(segmentKey) &&
-              existsSync(segmentPath)
-            ) {
-              uploadPromises.push(
-                uploadFileWithTracking(
-                  b2Service,
-                  segmentPath,
-                  segmentKey,
-                  "video/mp2t",
-                  BUCKET_TYPES.HLS_OUTPUT,
-                  stateManager,
-                  jobId,
-                ),
-              );
-              uploadCount++;
-            }
-          }
-        }
-      }
-
-      if (uploadPromises.length > 0) {
-        await JobManager.addJobLog(
-          jobId,
-          LOG_LEVELS.INFO,
-          `Uploading ${uploadCount} files to HLS bucket`,
-          "upload",
-          {
-            uploadCount,
-            skippedCount,
-          },
+        await b2Service.uploadFile(
+          thumbnailPath,
+          thumbnailKey,
+          contentType,
+          BUCKET_TYPES.HLS_OUTPUT,
         );
+        stateManager.addUploadedFile(thumbnailName, thumbnailKey);
 
-        try {
-          const uploadResults = await Promise.all(uploadPromises);
-          await JobManager.addJobLog(
-            jobId,
-            LOG_LEVELS.INFO,
-            `Successfully uploaded ${uploadResults.length} files to HLS bucket`,
-            "upload",
-            {
-              uploadedCount: uploadResults.length,
-              totalSkipped: skippedCount,
-            },
-          );
-        } catch (uploadError) {
-          await JobManager.addJobLog(
-            jobId,
-            LOG_LEVELS.ERROR,
-            `Upload failed: ${uploadError.message}`,
-            "upload",
-            {
-              error: uploadError.message,
-              uploadCount,
-              skippedCount,
-            },
-          );
-          throw uploadError;
-        }
-      } else {
+        // Delete thumbnail immediately after upload
+        rmSync(thumbnailPath, { force: true });
         await JobManager.addJobLog(
           jobId,
-          LOG_LEVELS.INFO,
-          "All files were already uploaded",
+          LOG_LEVELS.DEBUG,
+          `Uploaded and deleted thumbnail: ${thumbnailName}`,
           "upload",
         );
       }
+    }
 
-      stateManager.updateStage(JOB_STAGES.UPLOADED);
-    } else {
+    await JobManager.addJobLog(
+      jobId,
+      LOG_LEVELS.INFO,
+      "All remaining files uploaded and deleted",
+      "upload",
+    );
+
+    // Delete the original downloaded video file
+    if (existsSync(downloadedFile)) {
+      const originalSize = statSync(downloadedFile).size;
+      rmSync(downloadedFile, { force: true });
       await JobManager.addJobLog(
         jobId,
         LOG_LEVELS.INFO,
-        "Skipping upload stage (already completed)",
-        "resume",
+        `Deleted original video file (${(originalSize / 1024 / 1024).toFixed(2)}MB)`,
+        "cleanup",
+        {
+          file: basename(downloadedFile),
+          sizeBytes: originalSize,
+          sizeMB: (originalSize / 1024 / 1024).toFixed(2),
+        },
+      );
+      console.log(
+        `🧹 Deleted original video file (${(originalSize / 1024 / 1024).toFixed(2)}MB freed)`,
       );
     }
 
+    stateManager.updateStage(JOB_STAGES.UPLOADED);
+
+    // Stage 7: Send callback to web app
     job.progress(95);
-    const masterPlaylistKey = `${outputVideoName}/index.m3u8`;
 
     try {
       await sendCompletionCallback(
@@ -799,13 +857,10 @@ async function transcodingWorker(job) {
           callbackUrl: callbackUrl || "default",
         },
       );
-      throw new TranscodingError(
-        `Callback failed: ${callbackError.message}`,
-        "callback",
-        callbackError,
-      );
+      // Don't fail the job for callback errors
     }
 
+    // Stage 8: Mark as completed
     const totalSize = stateManager.state.uploadedFiles.reduce(
       (sum, file) => sum + (file.fileSize || 0),
       0,
@@ -868,6 +923,7 @@ async function transcodingWorker(job) {
       failedAt: new Date().toISOString(),
     });
 
+    // Send failure callback
     try {
       await sendFailureCallback(
         jobId,
@@ -896,63 +952,106 @@ async function transcodingWorker(job) {
 
     throw error;
   } finally {
-    await JobManager.addJobLog(
-      jobId,
-      LOG_LEVELS.DEBUG,
-      `Keeping temporary files for potential resume: ${tempDir}`,
-      "cleanup",
-    );
+    // ALWAYS cleanup temporary files - critical for storage management
+    try {
+      if (existsSync(tempDir)) {
+        await JobManager.addJobLog(
+          jobId,
+          LOG_LEVELS.INFO,
+          `Cleaning up temporary directory: ${tempDir}`,
+          "cleanup",
+        );
+
+        // Get directory size before cleanup for logging
+        const getDirectorySize = (dir) => {
+          let size = 0;
+          try {
+            const files = readdirSync(dir, { withFileTypes: true });
+            for (const file of files) {
+              const filePath = join(dir, file.name);
+              if (file.isDirectory()) {
+                size += getDirectorySize(filePath);
+              } else {
+                const stats = statSync(filePath);
+                size += stats.size;
+              }
+            }
+          } catch (err) {
+            // Ignore errors during size calculation
+          }
+          return size;
+        };
+
+        const dirSize = getDirectorySize(tempDir);
+        const dirSizeMB = (dirSize / 1024 / 1024).toFixed(2);
+
+        rmSync(tempDir, { recursive: true, force: true });
+
+        await JobManager.addJobLog(
+          jobId,
+          LOG_LEVELS.INFO,
+          `Cleaned up ${dirSizeMB}MB from temporary directory`,
+          "cleanup",
+          {
+            tempDir,
+            sizeBytes: dirSize,
+            sizeMB: dirSizeMB,
+          },
+        );
+
+        console.log(
+          `🧹 Cleaned up temporary directory: ${tempDir} (${dirSizeMB}MB freed)`,
+        );
+      }
+    } catch (cleanupError) {
+      await JobManager.addJobLog(
+        jobId,
+        LOG_LEVELS.ERROR,
+        `Failed to cleanup temporary files: ${cleanupError.message}`,
+        "cleanup",
+        {
+          error: cleanupError.message,
+          tempDir,
+        },
+      );
+      console.error(
+        `❌ Failed to cleanup temporary files for ${jobId}:`,
+        cleanupError.message,
+      );
+    }
   }
 }
 
-async function uploadFileWithTracking(
-  b2Service,
-  localPath,
-  remoteKey,
-  contentType,
-  bucketType,
-  stateManager,
-  jobId,
-) {
+// Helper function to calculate directory size
+function getDirectorySize(dir) {
+  let size = 0;
   try {
-    const result = await b2Service.uploadFile(
-      localPath,
-      remoteKey,
-      contentType,
-      bucketType,
-    );
-    stateManager.addUploadedFile(basename(localPath), remoteKey);
-    await JobManager.addJobLog(
-      jobId,
-      LOG_LEVELS.DEBUG,
-      `Uploaded file: ${remoteKey}`,
-      "upload",
-      {
-        localPath: basename(localPath),
-        remoteKey,
-        fileSize: result.fileSize,
-      },
-    );
-    return result;
-  } catch (error) {
-    await JobManager.addJobLog(
-      jobId,
-      LOG_LEVELS.ERROR,
-      `Failed to upload ${remoteKey}: ${error.message}`,
-      "upload",
-      {
-        localPath: basename(localPath),
-        remoteKey,
-        error: error.message,
-      },
-    );
-    throw error;
+    if (!existsSync(dir)) return 0;
+
+    const files = readdirSync(dir, { withFileTypes: true });
+    for (const file of files) {
+      const filePath = join(dir, file.name);
+      try {
+        if (file.isDirectory()) {
+          size += getDirectorySize(filePath);
+        } else {
+          const stats = statSync(filePath);
+          size += stats.size;
+        }
+      } catch (err) {
+        // Skip files we can't access
+      }
+    }
+  } catch (err) {
+    // Directory might not exist
   }
+  return size;
 }
 
 async function generateThumbnails(inputPath, outputDir, videoName) {
   const thumbnailPaths = [];
 
+  // Generate JPG thumbnail at 1 second
   const jpgPath = join(outputDir, `${videoName}-00001.jpg`);
   if (!existsSync(jpgPath)) {
     await new Promise((resolve, reject) => {
@@ -972,6 +1071,7 @@ async function generateThumbnails(inputPath, outputDir, videoName) {
     thumbnailPaths.push(jpgPath);
   }
 
+  // Generate PNG thumbnail at 1 second
   const pngPath = join(outputDir, `${videoName}-00001.png`);
   if (!existsSync(pngPath)) {
     await new Promise((resolve, reject) => {
@@ -1054,8 +1154,18 @@ async function transcodeToHLS(
   const config = RESOLUTION_CONFIGS[resolution];
   const outputDir = dirname(outputPath);
 
+  // Get format-specific input options
+  const inputOptions = getFormatSpecificOptions(inputPath);
+
   return new Promise((resolve, reject) => {
-    const command = ffmpeg(inputPath)
+    let command = ffmpeg(inputPath);
+
+    // Apply format-specific input options if any
+    if (inputOptions.length > 0) {
+      command = command.inputOptions(inputOptions);
+    }
+
+    command
       .addOptions([
         "-c:v libx264", // Video codec
         "-c:a aac", // Audio codec
@@ -1154,6 +1264,7 @@ async function transcodeToHLS(
 async function createMasterPlaylist(transcodedFiles, outputPath, videoInfo) {
   const masterPlaylist = ["#EXTM3U"];
 
+  // Sort resolutions by quality (highest first) to match AWS ETS behavior
   const sortedFiles = transcodedFiles.sort((a, b) => {
     const aConfig = RESOLUTION_CONFIGS[a.resolution];
     const bConfig = RESOLUTION_CONFIGS[b.resolution];
@@ -1173,6 +1284,19 @@ async function createMasterPlaylist(transcodedFiles, outputPath, videoInfo) {
   writeFileSync(outputPath, masterPlaylist.join("\n"));
 }
 
+// Helper function to format duration to hh:mm:ss
+function formatDuration(seconds) {
+  if (!seconds || isNaN(seconds)) return "00:00:00";
+
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+
+  return [hours, minutes, secs]
+    .map((v) => v.toString().padStart(2, "0"))
+    .join(":");
+}
+
 async function sendCompletionCallback(
   jobId,
   originalKey,
@@ -1182,6 +1306,7 @@ async function sendCompletionCallback(
   environment = "production",
   callbackUrl = null,
 ) {
+  // Use custom callback URL if provided, otherwise fall back to environment variable
   const targetUrl = callbackUrl || process.env.WEBAPP_CALLBACK_URL;
 
   if (!targetUrl) {
@@ -1204,10 +1329,12 @@ async function sendCompletionCallback(
     timestamp: new Date().toISOString(),
     metadata: {
       duration: videoInfo.duration,
+      durationFormatted: formatDuration(videoInfo.duration), // hh:mm:ss format
       originalResolution: `${videoInfo.width}x${videoInfo.height}`,
     },
   };
 
+  // Get callback token - same for all environments as requested
   const callbackToken =
     process.env.CALLBACK_TOKEN || process.env.WEBAPP_API_KEY || "none";
 
@@ -1228,6 +1355,7 @@ async function sendCompletionCallback(
       url: targetUrl,
       responseStatus: response.status,
       environment,
+      duration: formatDuration(videoInfo.duration),
     },
   );
 }
@@ -1239,6 +1367,7 @@ async function sendFailureCallback(
   environment = "production",
   callbackUrl = null,
 ) {
+  // Use custom callback URL if provided, otherwise fall back to environment variable
   const targetUrl = callbackUrl || process.env.WEBAPP_CALLBACK_URL;
 
   if (!targetUrl) {
@@ -1260,6 +1389,7 @@ async function sendFailureCallback(
     timestamp: new Date().toISOString(),
   };
 
+  // Get callback token - same for all environments as requested
   const callbackToken =
     process.env.CALLBACK_TOKEN || process.env.WEBAPP_API_KEY || "none";
 
@@ -1283,7 +1413,10 @@ async function sendFailureCallback(
   );
 }
 
-export async function cleanupOldJobs(maxAgeHours = 24) {
+// Cleanup function to remove old job directories (call this periodically)
+// Modified to be more aggressive for low storage environments
+export async function cleanupOldJobs(maxAgeHours = 1) {
+  // Changed from 24 to 1 hour
   const uploadsDir = process.env.TEMP_UPLOAD_DIR || "./uploads";
 
   if (!existsSync(uploadsDir)) {
@@ -1295,34 +1428,66 @@ export async function cleanupOldJobs(maxAgeHours = 24) {
 
   try {
     const dirs = readdirSync(uploadsDir);
+    let totalFreed = 0;
 
     for (const dir of dirs) {
       const dirPath = join(uploadsDir, dir);
+
+      // Skip if not a directory
+      try {
+        const stats = statSync(dirPath);
+        if (!stats.isDirectory()) continue;
+      } catch (err) {
+        continue;
+      }
+
       const stateFile = join(dirPath, "job_state.json");
 
-      if (existsSync(stateFile)) {
-        try {
-          const stateData = JSON.parse(readFileSync(stateFile, "utf8"));
-          const updatedAt = new Date(stateData.updatedAt).getTime();
+      // If no state file, delete immediately (orphaned directory)
+      if (!existsSync(stateFile)) {
+        const dirSize = getDirectorySize(dirPath);
+        rmSync(dirPath, { recursive: true, force: true });
+        totalFreed += dirSize;
+        console.log(
+          `🧹 Cleaned up orphaned directory: ${dir} (${(dirSize / 1024 / 1024).toFixed(2)}MB)`,
+        );
+        continue;
+      }
 
-          if (
-            (stateData.stage === JOB_STAGES.COMPLETED ||
-              stateData.stage === JOB_STAGES.FAILED) &&
-            now - updatedAt > maxAge
-          ) {
-            rmSync(dirPath, { recursive: true, force: true });
-            console.log(`Cleaned up old job directory: ${dir}`);
-          }
-        } catch (error) {
-          console.warn(
-            `Could not process job directory ${dir}:`,
-            error.message,
+      try {
+        const stateData = JSON.parse(readFileSync(stateFile, "utf8"));
+        const updatedAt = new Date(stateData.updatedAt).getTime();
+
+        // Clean up completed jobs older than 1 hour OR failed jobs older than 24 hours
+        const shouldCleanup =
+          (stateData.stage === JOB_STAGES.COMPLETED &&
+            now - updatedAt > maxAge) ||
+          (stateData.stage === JOB_STAGES.FAILED &&
+            now - updatedAt > 24 * 60 * 60 * 1000);
+
+        if (shouldCleanup) {
+          const dirSize = getDirectorySize(dirPath);
+          rmSync(dirPath, { recursive: true, force: true });
+          totalFreed += dirSize;
+          console.log(
+            `🧹 Cleaned up old job directory: ${dir} (${stateData.stage}, ${(dirSize / 1024 / 1024).toFixed(2)}MB)`,
           );
         }
+      } catch (error) {
+        console.warn(
+          `⚠️ Could not process job directory ${dir}:`,
+          error.message,
+        );
       }
     }
+
+    if (totalFreed > 0) {
+      console.log(
+        `🧹 Total storage freed: ${(totalFreed / 1024 / 1024).toFixed(2)}MB`,
+      );
+    }
   } catch (error) {
-    console.error(`Error during cleanup:`, error.message);
+    console.error(`❌ Error during cleanup:`, error.message);
   }
 }
 

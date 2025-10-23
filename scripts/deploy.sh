@@ -6,7 +6,7 @@
 set -e  # Exit on any error
 
 # Configuration
-SERVER="wtwt"
+SERVER="wtwh1"
 REMOTE_DIR="/var/www/transcoder"
 PM2_APP_NAME="transcoder"
 
@@ -75,6 +75,8 @@ rsync -avz --progress \
     --exclude='node_modules' \
     --exclude='uploads/*' \
     --exclude='database.sqlite' \
+    --exclude='database.sqlite-wal' \
+    --exclude='database.sqlite-shm' \
     --exclude='.env' \
     --exclude='.env.production' \
     --exclude='*.log' \

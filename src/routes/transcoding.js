@@ -17,23 +17,17 @@ function authenticate(req, res, next) {
   next();
 }
 
-router.post("/transcode", authenticate, async (req, res) => {
+router.post("/", authenticate, async (req, res) => {
   try {
-    const { key, resolutions, priority, videoName, callback_url, env } =
-      req.body;
+    const { key, resolutions, priority, videoName, callback_url } = req.body;
 
     if (!key) {
       return res.status(400).json({ error: "Missing required parameter: key" });
     }
 
-    const validEnvironments = ["staging", "production"];
-    const environment = env || "production"; // Default to production
-
-    if (!validEnvironments.includes(environment)) {
-      return res.status(400).json({
-        error: `Invalid environment: ${environment}. Valid options: ${validEnvironments.join(", ")}`,
-      });
-    }
+    const environment = callback_url.includes("stage")
+      ? "staging"
+      : "production";
 
     if (callback_url) {
       try {
