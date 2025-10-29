@@ -10,17 +10,22 @@ const router = Router();
 // Dashboard home
 router.get("/", async (req, res) => {
   try {
-    const [recentJobs, jobCounts, queueStats] = await Promise.all([
-      JobManager.getRecentJobs(10),
-      JobManager.getJobCounts(),
-      QueueManager.getQueueStats(),
-    ]);
+    const [processingJobs, recentJobs, jobCounts, queueStats, activeJobs] =
+      await Promise.all([
+        JobManager.getJobsByStatus("processing"),
+        JobManager.getRecentJobs(10),
+        JobManager.getJobCounts(),
+        QueueManager.getQueueStats(),
+        QueueManager.getActiveJobs(),
+      ]);
 
     res.render("dashboard", {
       title: "Video Transcoding Service",
+      processingJobs: processingJobs.slice(0, 10), // Show top 10 processing jobs
       recentJobs,
       jobCounts,
       queueStats,
+      activeJobs,
       currentTime: new Date().toISOString(),
     });
   } catch (error) {

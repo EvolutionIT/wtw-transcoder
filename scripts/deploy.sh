@@ -6,7 +6,7 @@
 set -e  # Exit on any error
 
 # Configuration
-SERVER="wtwh1"
+SERVER="wtwt"
 REMOTE_DIR="/var/www/transcoder"
 PM2_APP_NAME="transcoder"
 

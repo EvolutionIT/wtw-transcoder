@@ -1334,9 +1334,20 @@ async function sendCompletionCallback(
     },
   };
 
-  // Get callback token - same for all environments as requested
   const callbackToken =
     process.env.CALLBACK_TOKEN || process.env.WEBAPP_API_KEY || "none";
+
+  await JobManager.addJobLog(
+    jobId,
+    LOG_LEVELS.DEBUG,
+    `Preparing to send callback to ${targetUrl}`,
+    "callback",
+    {
+      url: targetUrl,
+      data: callbackData,
+      token: callbackToken !== "none" ? callbackToken : "none",
+    },
+  );
 
   const response = await axios.post(targetUrl, callbackData, {
     headers: {
