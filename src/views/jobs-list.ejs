@@ -196,7 +196,7 @@
           </small>
         </div>
         <div class="col-md-6">
-          <div class="d-flex gap-2 justify-content-md-end">
+          <div class="d-flex gap-2 justify-content-md-end flex-wrap">
             <select class="form-select form-select-sm" onchange="filterByStatus(this.value)" style="max-width: 150px;">
               <option value="all" <%=filters.status==='all' ? 'selected' : '' %>>All Status</option>
               <option value="queued" <%=filters.status==='queued' ? 'selected' : '' %>>Queued</option>
@@ -204,6 +204,12 @@
               <option value="completed" <%=filters.status==='completed' ? 'selected' : '' %>>Completed</option>
               <option value="failed" <%=filters.status==='failed' ? 'selected' : '' %>>Failed</option>
             </select>
+            <% if (jobCounts.failed > 0) { %>
+              <button class="btn btn-sm btn-danger" onclick="retryAllFailed()" title="Retry all failed jobs">
+                <i class="fas fa-exclamation-triangle me-1"></i>
+                Retry All Failed (<%= jobCounts.failed %>)
+              </button>
+            <% } %>
             <a href="/logs" class="btn btn-sm btn-outline-primary">
               <i class="fas fa-file-alt me-1"></i>
               View Logs
@@ -496,6 +502,38 @@
             showAlert('Failed to delete job: ' + error.message, 'danger');
             buttonElement.innerHTML = originalHtml;
             buttonElement.disabled = false;
+          });
+      }
+    }
+
+    function retryAllFailed() {
+      if (confirm('Are you sure you want to retry ALL failed jobs? This will queue all failed jobs for reprocessing.')) {
+        const button = event.target.closest('button');
+        const originalHtml = button.innerHTML;
+        button.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Retrying...';
+        button.disabled = true;
+
+        fetch(`/api/retry-all-failed`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              showAlert(`Successfully queued ${data.retriedCount} jobs for retry!`, 'success');
+              setTimeout(() => window.location.reload(), 1500);
+            } else {
+              showAlert('Failed to retry all jobs: ' + (data.error || data.message), 'danger');
+              button.innerHTML = originalHtml;
+              button.disabled = false;
+            }
+          })
+          .catch(error => {
+            showAlert('Failed to retry all jobs: ' + error.message, 'danger');
+            button.innerHTML = originalHtml;
+            button.disabled = false;
           });
       }
     }

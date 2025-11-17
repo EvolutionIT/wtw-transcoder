@@ -239,6 +239,40 @@ class QueueManager {
     }
   }
 
+  static async retryAllFailedJobs() {
+    if (!transcodingQueue) {
+      throw new Error("Queue not initialized");
+    }
+
+    try {
+      const failedJobs = await transcodingQueue.getFailed();
+      let retriedCount = 0;
+
+      for (const job of failedJobs) {
+        try {
+          await job.retry();
+          retriedCount++;
+          console.log(`Retried job ${job.id} (jobId: ${job.data.jobId})`);
+        } catch (error) {
+          console.error(`Failed to retry job ${job.id}:`, error.message);
+        }
+      }
+
+      console.log(
+        `Retried ${retriedCount} out of ${failedJobs.length} failed jobs`,
+      );
+      return {
+        success: true,
+        retriedCount,
+        totalFailed: failedJobs.length,
+        message: `Successfully queued ${retriedCount} jobs for retry`,
+      };
+    } catch (error) {
+      console.error("Error retrying all failed jobs:", error);
+      throw error;
+    }
+  }
+
   static async removeJob(jobId) {
     if (!transcodingQueue) {
       throw new Error("Queue not initialized");

@@ -245,9 +245,12 @@
             </div>
             <div class="col-md-2 col-sm-6 mb-3">
                 <div class="card stat-card failed">
-                    <div class="card-body text-center">
+                    <div class="card-body text-center" style="cursor: <%= jobCounts.failed > 0 ? 'pointer' : 'default' %>;" onclick="<%= jobCounts.failed > 0 ? 'retryAllFailed()' : '' %>">
                         <div class="stat-number"><%= jobCounts.failed %></div>
                         <div class="stat-label">Failed</div>
+                        <% if (jobCounts.failed > 0) { %>
+                            <small style="opacity: 0.7; margin-top: 0.5rem; display: block;">Click to retry all</small>
+                        <% } %>
                     </div>
                 </div>
             </div>
@@ -659,7 +662,7 @@
                         setTimeout(() => {
                             row.remove();
                         }, 300);
-                        
+
                         // Show success message
                         showAlert('Job deleted successfully', 'success');
                     } else {
@@ -672,6 +675,35 @@
                     showAlert('Failed to delete job: ' + error.message, 'danger');
                     buttonElement.innerHTML = originalHtml;
                     buttonElement.disabled = false;
+                });
+            }
+        }
+
+        function retryAllFailed() {
+            if (confirm('Are you sure you want to retry ALL failed jobs? This will queue all failed jobs for reprocessing.')) {
+                const failedCard = document.querySelector('.stat-card.failed');
+                const originalHtml = failedCard.innerHTML;
+                failedCard.innerHTML = '<div class="card-body text-center"><div style="font-size: 1.5rem;"><i class="fas fa-spinner fa-spin"></i></div><div class="stat-label">Retrying...</div></div>';
+
+                fetch(`/api/retry-all-failed`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showAlert(`Successfully queued ${data.retriedCount} jobs for retry!`, 'success');
+                        setTimeout(() => window.location.reload(), 1500);
+                    } else {
+                        showAlert('Failed to retry all jobs: ' + (data.error || data.message), 'danger');
+                        failedCard.innerHTML = originalHtml;
+                    }
+                })
+                .catch(error => {
+                    showAlert('Failed to retry all jobs: ' + error.message, 'danger');
+                    failedCard.innerHTML = originalHtml;
                 });
             }
         }

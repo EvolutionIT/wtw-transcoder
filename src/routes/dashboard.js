@@ -350,4 +350,18 @@ router.get("/api/job/:jobId/status", async (req, res) => {
   }
 });
 
+// API endpoint for retrying all failed jobs
+router.post("/api/retry-all-failed", async (req, res) => {
+  try {
+    const result = await QueueManager.retryAllFailedJobs();
+    res.json(result);
+  } catch (error) {
+    console.error("❌ Failed to retry all failed jobs:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
 export default router;

@@ -351,6 +351,19 @@ router.post("/queue/resume", authenticate, async (req, res) => {
   }
 });
 
+router.post("/queue/retry-all-failed", authenticate, async (req, res) => {
+  try {
+    const result = await QueueManager.retryAllFailedJobs();
+    res.json(result);
+  } catch (error) {
+    console.error("Failed to retry all failed jobs:", error);
+    res.status(500).json({
+      error: "Failed to retry all failed jobs",
+      message: error.message,
+    });
+  }
+});
+
 router.get("/queue/status", async (req, res) => {
   try {
     const isPaused = await QueueManager.isQueuePaused();
